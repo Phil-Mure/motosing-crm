@@ -143,6 +143,7 @@ def use_cookies_with_requests(cookies):
     print("Form found:", bool(loan_form))
 
 
+#Page 1/7
 #---After Login, the following is the submission page ---
 from playwright.sync_api import sync_playwright
 import time
@@ -218,3 +219,186 @@ def fill_application_form(context, personal_info):
 # This should be added after login 
 fill_submission_form(context, personal_info)  # Step 1 page
 fill_application_form(context, personal_info)  # Step 2 page
+
+
+
+
+# Employment Data Page 2/7,
+url = https://e-submission.chailease.com.my/apply?actionType=new&submissionNo=0&companyId=92&disableConvertUrl=true&lending=H&productCode=H-007-0000&productName=HP%20for%20Super%20Bike%20-%20New&productType=007
+
+#Getting Employment Info from Database
+# Fetch Working Info where NRIC = '980803035298'
+query = """
+SELECT * FROM "Working Info" WHERE NRIC = '980803035298'
+"""
+working_info_raw = db_chain.run(query)
+working_info = json.loads(working_info_raw) if isinstance(working_info_raw, str) else working_info_raw
+
+def fill_working_info_form(context, working_info):
+    page = context.pages[-1]  # Continue on the same page
+
+    # 1. Occupation (Position)
+    if working_info.get("Position"):
+        page.locator('#occupation').click()
+        page.locator(f'text="{working_info["Position"]}"').click()
+
+    # 2. Employer Name
+    if working_info.get("Company Name"):
+        page.locator('input[name="employerName"]').fill(working_info["Company Name"])
+
+    # 3. Monthly Income
+    if working_info.get("Net Salary"):
+        page.get_by_label("Monthly Income").fill(str(working_info["Net Salary"]))
+
+    # 4. Work Address
+    if working_info.get("Company Address"):
+        page.get_by_label("Work Address").fill(working_info["Company Address"])
+
+    # 5. Work Phone No.
+    if working_info.get("Company Phone Number"):
+        page.get_by_label("Work Phone No.").fill(working_info["Company Phone Number"])
+
+    # 6. Working in Singapore radio button
+    if working_info.get("Working in Singapore"):
+        answer = str(working_info["Working in Singapore"]).strip().lower()
+        if "yes" in answer or "true" in answer or answer == "1":
+            page.locator('input[name="workInSingapore"][value="true"]').check()
+        elif "no" in answer or answer == "0":
+            page.locator('input[name="workInSingapore"][value="false"]').check()
+
+    print("[INFO] Working Info section filled.")
+
+#Skip the Guarantor
+page = https://e-submission.chailease.com.my/apply?actionType=new&submissionNo=0&companyId=92&disableConvertUrl=true&lending=H&productCode=H-007-0000&productName=HP%20for%20Super%20Bike%20-%20New&productType=007
+def skip_guarantor_page(page):
+    try:
+        # Try clicking the "Next" or "Skip" button
+        page.get_by_role("button", name="Next").click()
+        page.wait_for_timeout(2000)
+        print("[INFO] Skipped Guarantor page using 'Next' button.")
+    except:
+        try:
+            page.get_by_role("button", name="Skip").click()
+            page.wait_for_timeout(2000)
+            print("[INFO] Skipped Guarantor page using 'Skip' button.")
+        except Exception as e:
+            print(f"[WARN] Could not skip Guarantor page: {e}")
+
+
+#Reference Contact Query Page 4/7
+# Fetch Working Info where NRIC = '980803035298'
+query = """
+SELECT * FROM "Reference Contact" WHERE NRIC = '980803035298'
+"""
+ref = db_chain.run(query)
+ref
+#working_info = json.loads(working_info_raw) if isinstance(working_info_raw, str) else working_info_raw
+
+
+#Filling Reference form
+def fill_reference_contact_form(page, ref_contact):
+    try:
+        if ref_contact.get("Name"):
+            page.locator('[formcontrolname="firstName"]').fill(ref_contact["Name"])
+
+        if ref_contact.get("Phone Number"):
+            page.locator('[formcontrolname="mobilePhone"]').fill(ref_contact["Phone Number"])
+
+        if ref_contact.get("Relation to user"):
+            # Click and select value from dropdown (PrimeNG)
+            page.locator('[formcontrolname="relationship"]').click()
+            page.locator(f'text="{ref_contact["Relation to user"]}"').click()
+
+        print("[INFO] Reference Contact form filled.")
+    except Exception as e:
+        print(f"[ERROR] Could not fill Reference Contact section: {e}")
+fill_reference_contact_form(page, ref_contact)
+
+
+
+#Page 5/7: Collateral
+# Get product info for given NRIC
+product_query = """
+SELECT "Brand", "Down Payment", "ID", "Model", "NRIC", "Number Plate", "Price", "Product Type", "Tenure"
+FROM "Product Info"
+WHERE NRIC = '980803035298'
+"""
+product_info_raw = db_chain.run(product_query)
+product_info = json.loads(product_info_raw) if isinstance(product_info_raw, str) else product_info_raw
+
+# Get corresponding model from Model Map
+model_query = f"""
+SELECT "Chailease" FROM "Model Map" WHERE "Webform" = '{product_info.get("Model")}'
+"""
+model_result = db_chain.run(model_query)
+model_name = json.loads(model_result).get("chailease") if isinstance(model_result, str) else model_result.get("chailease")
+
+# If no model is found, raise and stop
+if not model_name:
+    print("AUTOMATION STOPS NOW - INCORRECT/NON-EXISTING MODEL")
+    raise Exception(f"No model found for Webform Model: {product_info.get('Model')}")
+
+
+def fill_product_info_form(context, product_info, model_name):
+    page = context.pages[-1]  # continue on current page
+
+    # 1. Select brand from dropdown
+    if product_info.get("Brand"):
+        page.locator('[formcontrolname="brand"]').click()
+        page.locator(f'text="{product_info["Brand"]}"').click()
+
+    # 2. Select model from mapped Chailease model
+    if model_name:
+        page.locator('[formcontrolname="model"]').click()
+        page.locator(f'text="{model_name}"').click()
+
+    # 3. Date of Manufacture (hardcoded or from DB)
+    page.get_by_label("Date of Manufacture").fill("012025")
+
+    # 4. Plate No
+    if product_info.get("Number Plate"):
+        page.get_by_label("Plate No.").fill(product_info["Number Plate"])
+
+    # 5. Purchase Price
+    if product_info.get("Price"):
+        page.get_by_label("Purchase Price").fill(str(product_info["Price"]))
+
+    # 6. Down Payment
+    if product_info.get("Down Payment"):
+        page.get_by_label("Down Payment").fill(str(product_info["Down Payment"]))
+
+    print("[INFO] Product Info section filled successfully.")
+
+fill_product_info_form(context, product_info, model_name)
+
+
+#Page 6/7 Terms and Conditions
+product_query = """
+SELECT "Brand", "Down Payment", "ID", "Model", "NRIC", "Number Plate", "Price", "Product Type", "Tenure"
+FROM "Product Info"
+WHERE NRIC = '980803035298'
+"""
+product_info_raw = db_chain.run(product_query)
+product_info = json.loads(product_info_raw) if isinstance(product_info_raw, str) else product_info_raw
+
+
+def fill_dealer_and_tenure_fields(context, product_info):
+    page = context.pages[-1]
+
+    # 1. Dealer Sales (p-dropdown[formcontrolname="dealerSalesId"])
+    page.locator('[formcontrolname="dealerSalesId"]').click()
+    page.locator('text="MOTOSING SDN BHD"').click()
+
+    # 2. Marketing Officer - Select First Option
+    page.locator('[formcontrolname="marketingOfficer"]').click()
+    page.locator('.p-dropdown-item').nth(0).click()
+
+    # 3. Tenure Month from Product Info
+    if product_info.get("Tenure"):
+        page.locator('[formcontrolname="tenureMonth"]').click()
+        page.locator(f'text="{str(product_info["Tenure"])}"').click()
+
+    print("[INFO] Dealer, Marketing Officer and Tenure fields filled.")
+
+fill_product_info_form(context, product_info, model_name)
+fill_dealer_and_tenure_fields(context, product_info)
