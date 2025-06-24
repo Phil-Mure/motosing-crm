@@ -1,5 +1,5 @@
 # Installing necessary modules
-# pip install -qU "langchain[google-genai]" langchain-openai langchain-core langgraph langchain-community beautifulsoup4
+# pip install -qU "langchain[google-genai]" langchain-openai langchain-core langgraph langchain-community beautifulsoup4 playwright dotenv 
 
 # Importing necessary modules
 import faiss
@@ -12,6 +12,10 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing_extensions import List, TypedDict
+import ast
+from playwright.sync_api import sync_playwright
+import time
+import requests
 
 import getpass
 import os
@@ -55,99 +59,80 @@ print(db.get_usable_table_names())
 #Create SQL Chain
 db_chain = create_sql_agent(llm=llm, db=db, agent_type="openai-tools", verbose=True)
 
-#
-login_details = db.run("""
-    SELECT ID, AccountName, Password FROM LoanAccounts;
-""")
-
-
-#Getting site pages
-page0 = "https://e-submission.chailease.com.my/"
-page1 = "https://e-submission.chailease.com.my/"
-page2 = "https://e-submission.chailease.com.my/submission"
-
-
-#Getting login details 
-USER_ID = 9
-SELECTED_OPTION = "Loan Status"
+# Setting up currently logged in user and capturing the User ID
+USER_ID = 9 # 9 is for testing purposes only. The actual user ID will be gotted when user clicks the "Ok" button in the desktop app
+SELECTED_OPTION = "Chailease"
 SELECTED_LOAN = "Chailease"
-CHAILEASE_URL = "https://e-submission.chailease.com.my/"
-SITE_KEY = "not yet rotten this"  # replace with actual site key
-CAPTCHA_API_KEY = "not yet gotten this"
+CHAILEASE_URL = "https://e-submission.chailease.com.my/" # Dashboard URL
+LOGING_PAGE = "https://e-submission.chailease.com.my/login"
+SUBMISSION_PAGE = "https://e-submission.chailease.com.my/submission"
+FORM_URL = url = f"https://e-submission.chailease.com.my/apply?actionType=new&submissionNo=0&companyId={USER_ID}2&disableConvertUrl=true&lending=H&productCode=H-007-0000&productName=HP%20for%20Super%20Bike%20-%20New&productType=007"
 
-credentials_query = login_details
+# Querrying the DB to get login details to use at https://e-submission.chailease.com.my/login
+login_details = db.run(f"""
+     SELECT ID, AccountName, Password FROM LoanAccounts WHERE ID = {USER_ID};
+""")
+login_credentials = db_chain.invoke(login_details)
+print(login_credentials)
+credentials_result = login_credentials
 
-username = credentials_result.split("AccountName": ")[1].split(",")[0].strip("' \n") 
-password = credentials_result.split("Password": ")[1].split("\n")[0].strip("' \n")
-
+# Getting the actual USser Account and Password for Login
+results = credentials_result["input"]
+# Convert string of database output to actual list
+id = ast.literal_eval(results)[0][0]
+username = ast.literal_eval(results)[0][1]
+password = ast.literal_eval(results)[0][2]
 
 #reCAPTCHA with Playwright. Playwright is light and Faster than Selenium. Changed to Playwright + Requests + BeautifulSoup 
 from playwright.sync_api import sync_playwright
 import time
 import requests
 
-def solve_captcha_2captcha(site_key, page_url, api_key):
-    url = "http://2captcha.com/in.php"
-    payload = {
-        "key": api_key,
-        "method": "userrecaptcha",
-        "googlekey": site_key,
-        "pageurl": page_url,
-        "json": 1
-    }
-    res = requests.post(url, data=payload).json()
-    request_id = res["request"]
+# ---  LOGIN Page with reCAPTCHA ---
+def login(username, password):
 
-    fetch_url = f"http://2captcha.com/res.php?key={api_key}&action=get&id={request_id}&json=1"
-    while True:
-        time.sleep(5)
-        result = requests.get(fetch_url).json()
-        if result["status"] == 1:
-            return result["request"]
-        elif result["request"] != "CAPCHA_NOT_READY":
-            raise Exception(result["request"])
-
-def login_and_get_cookies(username, password, sitekey, captcha_key):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
-        page.goto("https://e-submission.chailease.com.my/")
+        page.goto("https://e-submission.chailease.com.my/login")
 
-        page.fill("#username", username)
-        page.fill("#password", password)
+        page.fill("#account", username)
+        page.fill("#userPassword", password)
 
-        token = solve_captcha_2captcha(sitekey, "https://e-submission.chailease.com.my/", captcha_key)
-        page.evaluate(f'document.getElementById("g-recaptcha-response").innerHTML = "{token}"')
-        page.click("#loginBtn")
+        # Wait for iframe with reCAPTCHA
+        iframe_element = page.frame_locator("iframe[src*='recaptcha']")
+        iframe = iframe_element.frame()
 
+        # Click on the checkbox inside the iframe
+        iframe.locator("#ngrecaptcha-0").click()
+
+        # Optional: wait and observe
         page.wait_for_timeout(3000)
+
         cookies = context.cookies()
-        browser.close()
-        return cookies
 
-#Storing login cookies and session with  requests and BeautifulSoup 
-import requests
-from bs4 import BeautifulSoup
+    print("Login Successfull")  
 
-def use_cookies_with_requests(cookies):
-    session = requests.Session()
-    for c in cookies:
-        session.cookies.set(c['name'], c['value'])
+# Python code to convert database output to Python Dictionary
+def parse_to_dict(text: str) -> dict:
+    data = {}
+    lines = text.strip().splitlines()
+    for line in lines:
+        if ": " in line:
+            key, value = line.split(": ", 1)
+            value = value.strip()
+            # Convert values
+            if value.lower() == "none":
+                value = None
+            elif value.isdigit():
+                value = int(value)
+            data[key.strip()] = value
+    return data
+  
 
-    dashboard = session.get("https://e-submission.chailease.com.my")
-    soup = BeautifulSoup(dashboard.text, "html.parser")
-
-    # example: find form and fill it
-    loan_form = soup.find("form", {"id": "loan_form"})
-    print("Form found:", bool(loan_form))
-
-
-#Page 1/7
-#---After Login, the following is the submission page ---
-from playwright.sync_api import sync_playwright
-import time
-
+# ----   Page 1/7 ---
+#After Login, the following is the submission page ---
 def fill_submission_form(context, personal_info_data):
     page = context.new_page()
     page.goto("https://e-submission.chailease.com.my/submission")
@@ -157,37 +142,41 @@ def fill_submission_form(context, personal_info_data):
     page.locator('input[name="action"][value="new"]').check()
 
     # === Step 2: Select dropdown with "HP for Super - New"
-    dropdown = page.locator('select.ng-tns-c77-16')
+    dropdown = page.locator('select.ng-tns-c77-16')  
     dropdown.select_option(label="HP for Super - New")
 
     # === Step 3: Fill ID No
-    page.get_by_label("ID No").fill("9")
+    page.get_by_label("ID No").fill(f"{USER_ID}")
 
     # === Step 4: Click Next
     page.get_by_role("button", name="Next").click()
     page.wait_for_timeout(3000)
 
- #---After Submission, the following is the personal infor page ---
-# Fetch data from Personal Info table for User ID 16
-query = """
-SELECT "Address", "Bumi", "Email", "Gender", "ID", "Loan Status", "Marital Status",
-       "Name", "No of year in residence", "NRIC", "Ownership Status", "Phone Number",
-       "Race", "Stay in registered address", "Timestamp", "Title",
-       "Where user stay(If not stay in registered address)"
-FROM "Personal Info"
-WHERE ID = 16
+    # === Step 5: Fill Personal Info table fields
+    for field, value in personal_info_data.items():
+        try:
+            page.get_by_label(field).fill(str(value))
+        except:
+            print(f"[WARN] Could not fill: {field}")
+
+    print("First Submission!.")
+
+# Fetch data from Personal Info table for User ID {USER_ID}
+query = f"""
+  SELECT "Address", "Bumi", "Email", "Gender", "ID", "Loan Status", "Marital Status",
+        "Name", "No of year in residence", "NRIC", "Ownership Status", "Phone Number",
+        "Race", "Stay in registered address", "Timestamp", "Title",
+        "Where user stay(If not stay in registered address)"
+  FROM "Personal Info"
+WHERE ID = {USER_ID}
 """
-
-result = db_chain.run(query)
-personal_info = json.loads(result) if isinstance(result, str) else result
-
-#--- Playwright Automation with Personal Info Page----
+db_result = db_chain.run(query)
+personal_info = parse_to_dict(db_result)
 
 def fill_application_form(context, personal_info):
     page = context.new_page()
-    page.goto("https://e-submission.chailease.com.my/apply?actionType=new&submissionNo=0&companyId=92&disableConvertUrl=true&lending=H&productCode=H-007-0000&productName=HP%20for%20Super%20Bike%20-%20New&productType=007")
+    page.goto(FORM_URL)
     page.wait_for_timeout(3000)
-
     # Map DB fields to formcontrolnames
     field_map = {
         "idNo": personal_info.get("NRIC"),
@@ -214,13 +203,70 @@ def fill_application_form(context, personal_info):
         except Exception as e:
             print(f"[WARN] Could not fill {control_name}: {e}")
 
-    print("[INFO] Application form filled successfully.")
-
-# This should be added after login 
-fill_submission_form(context, personal_info)  # Step 1 page
-fill_application_form(context, personal_info)  # Step 2 page
+    print("Personal Info filled successfully.")
 
 
+# ---  Employment Data Page 2/7 ---
+
+#Getting Employment Info from Database
+# Fetch Working Info where ID = USER_ID
+query = f"""
+SELECT * FROM "Working Info" WHERE ID = {USER_ID}
+"""
+working_info_raw = db_chain.run(query)
+working_info = parse_to_dict(working_info_raw)
+print(working_info)
+
+def fill_working_info_form(context, working_info):
+    page = context.pages
+    page.goto(FORM_URL)
+
+    # 1. Occupation (Position)
+    if working_info.get("Position"):
+        page.locator('#occupation').click()
+        page.locator(f'text="{working_info["Position"]}"').click()
+
+    # 2. Employer Name
+    if working_info.get("Company Name"):
+        page.locator('input[name="employerName"]').fill(working_info["Company Name"])
+
+    # 3. Monthly Income
+    if working_info.get("Net Salary"):
+        page.get_by_label("Monthly Income").fill(str(working_info["Net Salary"]))
+
+    # 4. Work Address
+    if working_info.get("Company Address"):
+        page.get_by_label("Work Address").fill(working_info["Company Address"])
+
+    # 5. Work Phone No.
+    if working_info.get("Company Phone Number"):
+        page.get_by_label("Work Phone No.").fill(working_info["Company Phone Number"])
+
+    # 6. Working in Singapore radio button
+    if working_info.get("Working in Singapore"):
+        answer = str(working_info["Working in Singapore"]).strip().lower()
+        if "yes" in answer or "true" in answer or answer == "1":
+            page.locator('input[name="workInSingapore"][value="true"]').check()
+        elif "no" in answer or answer == "0":
+            page.locator('input[name="workInSingapore"][value="false"]').check()
+
+    print("[INFO] Working Info section filled.")
+
+#Skip the Guarantor
+def skip_guarantor_page(page):
+    page.goto(FORM_URL)
+    try:
+        # Try clicking the "Next" or "Skip" button
+        page.get_by_role("button", name="Next").click()
+        page.wait_for_timeout(2000)
+        print("[INFO] Skipped Guarantor page using 'Next' button.")
+    except:
+        try:
+            page.get_by_role("button", name="Skip").click()
+            page.wait_for_timeout(2000)
+            print("[INFO] Skipped Guarantor page using 'Skip' button.")
+        except Exception as e:
+            print(f"[WARN] Could not skip Guarantor page: {e}")
 
 
 # Employment Data Page 2/7,
@@ -285,120 +331,9 @@ def skip_guarantor_page(page):
             print(f"[WARN] Could not skip Guarantor page: {e}")
 
 
-#Reference Contact Query Page 4/7
-# Fetch Working Info where NRIC = '980803035298'
-query = """
-SELECT * FROM "Reference Contact" WHERE NRIC = '980803035298'
+# -- Reference Contact Query Page 4/7 ---
+# Fetch Working Info where ID = USER_ID
+query = f"""
+SELECT * FROM "Reference Contact" WHERE NRIC = {USER_ID}
 """
 ref = db_chain.run(query)
-ref
-#working_info = json.loads(working_info_raw) if isinstance(working_info_raw, str) else working_info_raw
-
-
-#Filling Reference form
-def fill_reference_contact_form(page, ref_contact):
-    try:
-        if ref_contact.get("Name"):
-            page.locator('[formcontrolname="firstName"]').fill(ref_contact["Name"])
-
-        if ref_contact.get("Phone Number"):
-            page.locator('[formcontrolname="mobilePhone"]').fill(ref_contact["Phone Number"])
-
-        if ref_contact.get("Relation to user"):
-            # Click and select value from dropdown (PrimeNG)
-            page.locator('[formcontrolname="relationship"]').click()
-            page.locator(f'text="{ref_contact["Relation to user"]}"').click()
-
-        print("[INFO] Reference Contact form filled.")
-    except Exception as e:
-        print(f"[ERROR] Could not fill Reference Contact section: {e}")
-fill_reference_contact_form(page, ref_contact)
-
-
-
-#Page 5/7: Collateral
-# Get product info for given NRIC
-product_query = """
-SELECT "Brand", "Down Payment", "ID", "Model", "NRIC", "Number Plate", "Price", "Product Type", "Tenure"
-FROM "Product Info"
-WHERE NRIC = '980803035298'
-"""
-product_info_raw = db_chain.run(product_query)
-product_info = json.loads(product_info_raw) if isinstance(product_info_raw, str) else product_info_raw
-
-# Get corresponding model from Model Map
-model_query = f"""
-SELECT "Chailease" FROM "Model Map" WHERE "Webform" = '{product_info.get("Model")}'
-"""
-model_result = db_chain.run(model_query)
-model_name = json.loads(model_result).get("chailease") if isinstance(model_result, str) else model_result.get("chailease")
-
-# If no model is found, raise and stop
-if not model_name:
-    print("AUTOMATION STOPS NOW - INCORRECT/NON-EXISTING MODEL")
-    raise Exception(f"No model found for Webform Model: {product_info.get('Model')}")
-
-
-def fill_product_info_form(context, product_info, model_name):
-    page = context.pages[-1]  # continue on current page
-
-    # 1. Select brand from dropdown
-    if product_info.get("Brand"):
-        page.locator('[formcontrolname="brand"]').click()
-        page.locator(f'text="{product_info["Brand"]}"').click()
-
-    # 2. Select model from mapped Chailease model
-    if model_name:
-        page.locator('[formcontrolname="model"]').click()
-        page.locator(f'text="{model_name}"').click()
-
-    # 3. Date of Manufacture (hardcoded or from DB)
-    page.get_by_label("Date of Manufacture").fill("012025")
-
-    # 4. Plate No
-    if product_info.get("Number Plate"):
-        page.get_by_label("Plate No.").fill(product_info["Number Plate"])
-
-    # 5. Purchase Price
-    if product_info.get("Price"):
-        page.get_by_label("Purchase Price").fill(str(product_info["Price"]))
-
-    # 6. Down Payment
-    if product_info.get("Down Payment"):
-        page.get_by_label("Down Payment").fill(str(product_info["Down Payment"]))
-
-    print("[INFO] Product Info section filled successfully.")
-
-fill_product_info_form(context, product_info, model_name)
-
-
-#Page 6/7 Terms and Conditions
-product_query = """
-SELECT "Brand", "Down Payment", "ID", "Model", "NRIC", "Number Plate", "Price", "Product Type", "Tenure"
-FROM "Product Info"
-WHERE NRIC = '980803035298'
-"""
-product_info_raw = db_chain.run(product_query)
-product_info = json.loads(product_info_raw) if isinstance(product_info_raw, str) else product_info_raw
-
-
-def fill_dealer_and_tenure_fields(context, product_info):
-    page = context.pages[-1]
-
-    # 1. Dealer Sales (p-dropdown[formcontrolname="dealerSalesId"])
-    page.locator('[formcontrolname="dealerSalesId"]').click()
-    page.locator('text="MOTOSING SDN BHD"').click()
-
-    # 2. Marketing Officer - Select First Option
-    page.locator('[formcontrolname="marketingOfficer"]').click()
-    page.locator('.p-dropdown-item').nth(0).click()
-
-    # 3. Tenure Month from Product Info
-    if product_info.get("Tenure"):
-        page.locator('[formcontrolname="tenureMonth"]').click()
-        page.locator(f'text="{str(product_info["Tenure"])}"').click()
-
-    print("[INFO] Dealer, Marketing Officer and Tenure fields filled.")
-
-fill_product_info_form(context, product_info, model_name)
-fill_dealer_and_tenure_fields(context, product_info)
