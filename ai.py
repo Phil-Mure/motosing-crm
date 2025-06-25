@@ -1,6 +1,7 @@
 # Installing necessary modules
-# pip install -qU "langchain[google-genai]" langchain-openai langchain-core langgraph langchain-community beautifulsoup4 playwright dotenv 
+# pip install -qU "langchain[google-genai]" langchain-openai langchain-core langgraph langchain-community beautifulsoup4 faiss-cpu pymysql sqlalchemy selenium pandas pymysql sqlalchemy playwright mysql-connector-python
 
+# Importing necessary modules
 # Importing necessary modules
 import faiss
 import bs4
@@ -12,13 +13,18 @@ from langchain_community.document_loaders import WebBaseLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from typing_extensions import List, TypedDict
-import ast
-from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup, SoupStrainer
+from langchain_community.utilities import SQLDatabase
 import time
 import requests
-
-import getpass
-import os
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from langchain_community.agent_toolkits import create_sql_agent
+import pandas as pd
+import sqlite3
+from sqlalchemy import create_engine
+from playwright.sync_api import sync_playwright
 
 if not os.environ.get("GOOGLE_API_KEY"):
   os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter API key for Google Gemini: ")
@@ -51,13 +57,17 @@ if not os.environ.get("LANGSMITH_API_KEY"):
 
 
 
-#Initializing the database 
+#  ---  Initializing the database with LangChain  ---
 db = SQLDatabase.from_uri("mysql+mysqlconnector://root:FQfC$peBp_^2Y2L@178.128.49.31:3306/crm_002_db")
 print(db.dialect)
 print(db.get_usable_table_names())
-
 #Create SQL Chain
 db_chain = create_sql_agent(llm=llm, db=db, agent_type="openai-tools", verbose=True)
+
+# ---  (OPTION) Initializing datase with pandas ---
+db_url = "mysql+pymysql://root:FQfC$peBp_^2Y2L@178.128.49.31:3306/crm_002_db"
+# Create the SQLAlchemy engine
+engine = create_engine(db_url)
 
 # Setting up currently logged in user and capturing the User ID
 USER_ID = 9 # 9 is for testing purposes only. The actual user ID will be gotted when user clicks the "Ok" button in the desktop app
@@ -331,9 +341,104 @@ def skip_guarantor_page(page):
             print(f"[WARN] Could not skip Guarantor page: {e}")
 
 
-# -- Reference Contact Query Page 4/7 ---
-# Fetch Working Info where ID = USER_ID
-query = f"""
-SELECT * FROM "Reference Contact" WHERE NRIC = {USER_ID}
+# -- Reference Contact Query: Page 4/7 ---
+ref_df = pd.read_sql(f'SELECT * FROM `Reference Contact` WHERE ID = {USER_ID}', engine)
+ref_contact = ref_df.iloc[0]
+#Filling Reference form
+def fill_reference_contact_form(page, context, ref_contact):
+    page = context.new_page()
+    page.goto(FORM_URL)
+    try:
+        if ref_contact.get("Name"):
+            page.locator('[formcontrolname="firstName"]').fill(ref_contact["Name"])
+
+        if ref_contact.get("Phone Number"):
+            page.locator('[formcontrolname="mobilePhone"]').fill(ref_contact["Phone Number"])
+
+        if ref_contact.get("Relation to user"):
+            # Click and select value from dropdown (PrimeNG)
+            page.locator('[formcontrolname="relationship"]').click()
+            page.locator(f'text="{ref_contact["Relation to user"]}"').click()
+
+        print("[INFO] Reference Contact form filled.")
+    except Exception as e:
+        print(f"[ERROR] Could not fill Reference Contact section: {e}")
+
+
+#  ---  Page 5/7: Collateral ---
+# Get product info for given USER ID
+product_df = pd.read_sql(f"""SELECT "Brand", "Down Payment", "ID", "Model", "NRIC", "Number Plate", "Price", "Product Type", 
+"Tenure" FROM `Product Info` WHERE ID = {USER_ID}""", engine)
+product_info = product_df.iloc[:, :]
+
+model_df = pd.read_sql(f"""SELECT "Chailease" FROM `Model Map` WHERE "Webform" = '{product_info.get("Model")}' AND ID = {USER_ID}""", engine)
+model_result = model_df.iloc[:, :]
+model_result
+
+
+model_name = model_result.get("Chailease")
+model_name
+def fill_product_info_form(context, product_info, model_name):
+    page = context.new_page()
+    page.goto(FORM_URL)
+    # If no model is found, raise and stop
+    if model_name.empty:
+        print("AUTOMATION STOPS NOW - INCORRECT/NON-EXISTING MODEL")
+        raise Exception(f"No model found for Webform Model: {product_info.get('Model')}")
+        page = context.pages[-1]  # continue on current page
+
+    # 1. Select brand from dropdown
+    if product_info.get("Brand"):
+        page.locator('[formcontrolname="brand"]').click()
+        page.locator(f'text="{product_info["Brand"]}"').click()
+
+    # 2. Select model from mapped Chailease model
+    if model_name:
+        page.locator('[formcontrolname="model"]').click()
+        page.locator(f'text="{model_name}"').click()
+
+    # 3. Date of Manufacture (hardcoded or from DB)
+    page.get_by_label("Date of Manufacture").fill("012025")
+
+    # 4. Plate No
+    if product_info.get("Number Plate"):
+        page.get_by_label("Plate No.").fill(product_info["Number Plate"])
+
+    # 5. Purchase Price
+    if product_info.get("Price"):
+        page.get_by_label("Purchase Price").fill(str(product_info["Price"]))
+
+    # 6. Down Payment
+    if product_info.get("Down Payment"):
+        page.get_by_label("Down Payment").fill(str(product_info["Down Payment"]))
+
+    print("[INFO] Product Info section filled successfully.")
+
+
+# --- Page 6/7 Terms and Conditions ---
+product_query = f"""
+SELECT "Brand", "Down Payment", "ID", "Model", "NRIC", "Number Plate", "Price", "Product Type", "Tenure"
+FROM "Product Info"
+WHERE NRIC = {USER_ID}
 """
-ref = db_chain.run(query)
+product_info_raw = db_chain.run(product_query)
+product_info = parse_to_dict(product_info_raw)
+print(product_info)
+
+def fill_dealer_and_tenure_fields(context, product_info):
+    page = context.pages[-1]
+
+    # 1. Dealer Sales (p-dropdown[formcontrolname="dealerSalesId"])
+    page.locator('[formcontrolname="dealerSalesId"]').click()
+    page.locator('text="MOTOSING SDN BHD"').click()
+
+    # 2. Marketing Officer - Select First Option
+    page.locator('[formcontrolname="marketingOfficer"]').click()
+    page.locator('.p-dropdown-item').nth(0).click()
+
+    # 3. Tenure Month from Product Info
+    if product_info.get("Tenure"):
+        page.locator('[formcontrolname="tenureMonth"]').click()
+        page.locator(f'text="{str(product_info["Tenure"])}"').click()
+
+    print("[INFO] Dealer, Marketing Officer and Tenure fields filled.")
