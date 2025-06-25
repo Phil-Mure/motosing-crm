@@ -1,5 +1,5 @@
 # Installing necessary modules
-# pip install -qU "langchain[google-genai]" langchain-openai langchain-core langgraph langchain-community beautifulsoup4 faiss-cpu pymysql sqlalchemy selenium pandas pymysql sqlalchemy playwright mysql-connector-python
+# pip install -qU "langchain[google-genai]" langchain-openai langchain-core langgraph langchain-community beautifulsoup4 faiss-cpu pymysql sqlalchemy selenium pandas pymysql sqlalchemy mysql-connector-python playwright && playwright install
 
 # Importing necessary modules
 # Importing necessary modules
@@ -25,22 +25,19 @@ import pandas as pd
 import sqlite3
 from sqlalchemy import create_engine
 from playwright.sync_api import sync_playwright
+import getpass
+import os
+from langchain.chat_models import init_chat_model
 
 if not os.environ.get("GOOGLE_API_KEY"):
   os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter API key for Google Gemini: ")
 
-from langchain.chat_models import init_chat_model
-
 llm = init_chat_model("gemini-2.0-flash", model_provider="google_genai")
-import getpass
-import os
 
 if not os.environ.get("GOOGLE_API_KEY"):
   os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter API key for Google Gemini: ")
 
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-
-
 embedding_dim = len(embeddings.embed_query("hello world"))
 index = faiss.IndexFlatL2(embedding_dim)
 
@@ -99,28 +96,23 @@ import time
 import requests
 
 # ---  LOGIN Page with reCAPTCHA ---
-def login(username, password):
+def login(page, username, password):
+    page.goto("https://e-submission.chailease.com.my/login")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto("https://e-submission.chailease.com.my/login")
+    page.fill("#account", username)
+    page.fill("#userPassword", password)
 
-        page.fill("#account", username)
-        page.fill("#userPassword", password)
+    # Wait for iframe with reCAPTCHA
+    iframe_element = page.frame_locator("iframe[src*='recaptcha']")
+    iframe = iframe_element.frame()
 
-        # Wait for iframe with reCAPTCHA
-        iframe_element = page.frame_locator("iframe[src*='recaptcha']")
-        iframe = iframe_element.frame()
+    # Click on the checkbox inside the iframe
+    iframe.locator("#ngrecaptcha-0").click()
 
-        # Click on the checkbox inside the iframe
-        iframe.locator("#ngrecaptcha-0").click()
+    # Optional: wait and observe
+    page.wait_for_timeout(3000)
 
-        # Optional: wait and observe
-        page.wait_for_timeout(3000)
-
-        cookies = context.cookies()
+    cookies = context.cookies()
 
     print("Login Successfull")  
 
@@ -143,8 +135,7 @@ def parse_to_dict(text: str) -> dict:
 
 # ----   Page 1/7 ---
 #After Login, the following is the submission page ---
-def fill_submission_form(context, personal_info_data):
-    page = context.new_page()
+def fill_submission_form(page):
     page.goto("https://e-submission.chailease.com.my/submission")
     time.sleep(3)
 
@@ -162,15 +153,10 @@ def fill_submission_form(context, personal_info_data):
     page.get_by_role("button", name="Next").click()
     page.wait_for_timeout(3000)
 
-    # === Step 5: Fill Personal Info table fields
-    for field, value in personal_info_data.items():
-        try:
-            page.get_by_label(field).fill(str(value))
-        except:
-            print(f"[WARN] Could not fill: {field}")
-
     print("First Submission!.")
 
+
+# ----  Page 1 of 7: Filling Personal Data --- 
 # Fetch data from Personal Info table for User ID {USER_ID}
 query = f"""
   SELECT "Address", "Bumi", "Email", "Gender", "ID", "Loan Status", "Marital Status",
@@ -262,71 +248,9 @@ def fill_working_info_form(context, working_info):
 
     print("[INFO] Working Info section filled.")
 
-#Skip the Guarantor
+#  ---- Skip the Guarantor: page 3/7 ----
 def skip_guarantor_page(page):
     page.goto(FORM_URL)
-    try:
-        # Try clicking the "Next" or "Skip" button
-        page.get_by_role("button", name="Next").click()
-        page.wait_for_timeout(2000)
-        print("[INFO] Skipped Guarantor page using 'Next' button.")
-    except:
-        try:
-            page.get_by_role("button", name="Skip").click()
-            page.wait_for_timeout(2000)
-            print("[INFO] Skipped Guarantor page using 'Skip' button.")
-        except Exception as e:
-            print(f"[WARN] Could not skip Guarantor page: {e}")
-
-
-# Employment Data Page 2/7,
-url = https://e-submission.chailease.com.my/apply?actionType=new&submissionNo=0&companyId=92&disableConvertUrl=true&lending=H&productCode=H-007-0000&productName=HP%20for%20Super%20Bike%20-%20New&productType=007
-
-#Getting Employment Info from Database
-# Fetch Working Info where NRIC = '980803035298'
-query = """
-SELECT * FROM "Working Info" WHERE NRIC = '980803035298'
-"""
-working_info_raw = db_chain.run(query)
-working_info = json.loads(working_info_raw) if isinstance(working_info_raw, str) else working_info_raw
-
-def fill_working_info_form(context, working_info):
-    page = context.pages[-1]  # Continue on the same page
-
-    # 1. Occupation (Position)
-    if working_info.get("Position"):
-        page.locator('#occupation').click()
-        page.locator(f'text="{working_info["Position"]}"').click()
-
-    # 2. Employer Name
-    if working_info.get("Company Name"):
-        page.locator('input[name="employerName"]').fill(working_info["Company Name"])
-
-    # 3. Monthly Income
-    if working_info.get("Net Salary"):
-        page.get_by_label("Monthly Income").fill(str(working_info["Net Salary"]))
-
-    # 4. Work Address
-    if working_info.get("Company Address"):
-        page.get_by_label("Work Address").fill(working_info["Company Address"])
-
-    # 5. Work Phone No.
-    if working_info.get("Company Phone Number"):
-        page.get_by_label("Work Phone No.").fill(working_info["Company Phone Number"])
-
-    # 6. Working in Singapore radio button
-    if working_info.get("Working in Singapore"):
-        answer = str(working_info["Working in Singapore"]).strip().lower()
-        if "yes" in answer or "true" in answer or answer == "1":
-            page.locator('input[name="workInSingapore"][value="true"]').check()
-        elif "no" in answer or answer == "0":
-            page.locator('input[name="workInSingapore"][value="false"]').check()
-
-    print("[INFO] Working Info section filled.")
-
-#Skip the Guarantor
-page = https://e-submission.chailease.com.my/apply?actionType=new&submissionNo=0&companyId=92&disableConvertUrl=true&lending=H&productCode=H-007-0000&productName=HP%20for%20Super%20Bike%20-%20New&productType=007
-def skip_guarantor_page(page):
     try:
         # Try clicking the "Next" or "Skip" button
         page.get_by_role("button", name="Next").click()
@@ -346,7 +270,6 @@ ref_df = pd.read_sql(f'SELECT * FROM `Reference Contact` WHERE ID = {USER_ID}', 
 ref_contact = ref_df.iloc[0]
 #Filling Reference form
 def fill_reference_contact_form(page, context, ref_contact):
-    page = context.new_page()
     page.goto(FORM_URL)
     try:
         if ref_contact.get("Name"):
